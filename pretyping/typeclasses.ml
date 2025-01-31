@@ -1,5 +1,5 @@
 (************************************************************************)
-(*         *   The Coq Proof Assistant / The Coq Development Team       *)
+(*         *      The Rocq Prover / The Rocq Development Team           *)
 (*  v      *         Copyright INRIA, CNRS and contributors             *)
 (* <O___,, * (see version control and CREDITS file for authors & dates) *)
 (*   \VV/  **************************************************************)
@@ -10,7 +10,6 @@
 
 (*i*)
 open Names
-open Globnames
 open Constr
 open Vars
 open Evd
@@ -25,21 +24,13 @@ type 'a hint_info_gen =
     { hint_priority : int option;
       hint_pattern : 'a option }
 
-type hint_info = (Pattern.patvar list * Pattern.constr_pattern) hint_info_gen
+type hint_info = (Id.Set.t * Pattern.constr_pattern) hint_info_gen
 
-let get_typeclasses_unique_solutions =
+let { Goptions.get = get_typeclasses_unique_solutions } =
   Goptions.declare_bool_option_and_ref
-    ~depr:false
     ~key:["Typeclasses";"Unique";"Solutions"]
     ~value:false
-
-let (classes_transparent_state, classes_transparent_state_hook) = Hook.make ()
-let classes_transparent_state () = Hook.get classes_transparent_state ()
-
-let get_solve_one_instance, solve_one_instance_hook = Hook.make ()
-
-let resolve_one_typeclass ?(unique=get_typeclasses_unique_solutions ()) env evm t =
-  Hook.get get_solve_one_instance env evm t unique
+    ()
 
 type class_method = {
   meth_name : Name.t;
@@ -50,7 +41,7 @@ type class_method = {
 (* This module defines type-classes *)
 type typeclass = {
   (* Universe quantification *)
-  cl_univs : Univ.AbstractContext.t;
+  cl_univs : UVars.AbstractContext.t;
 
   (* The class implementation *)
   cl_impl : GlobRef.t;
@@ -92,15 +83,19 @@ let classes : typeclasses ref = Summary.ref GlobRef.Map.empty ~name:"classes"
 let instances : instances ref = Summary.ref GlobRef.Map.empty ~name:"instances"
 
 let typeclass_univ_instance (cl, u) =
-  assert (Univ.AbstractContext.size cl.cl_univs == Univ.Instance.length u);
+  assert (UVars.eq_sizes (UVars.AbstractContext.size cl.cl_univs) (UVars.Instance.length u));
   let subst_ctx c = Context.Rel.map (subst_instance_constr u) c in
     { cl with cl_context = subst_ctx cl.cl_context;
       cl_props = subst_ctx cl.cl_props}
 
-let class_info env sigma c =
-  try GlobRef.Map.find c !classes
-  with Not_found ->
-    not_a_class env sigma (EConstr.of_constr (printable_constr_of_global c))
+let class_info c = GlobRef.Map.find_opt c !classes
+
+let class_info_exn env sigma r =
+  match class_info r with
+  | Some v -> v
+  | None ->
+    let sigma, c = Evd.fresh_global env sigma r in
+    not_a_class env sigma c
 
 let global_class_of_constr env sigma c =
   try let gr, u = EConstr.destRef sigma c in
@@ -108,11 +103,11 @@ let global_class_of_constr env sigma c =
   with DestKO | Not_found -> not_a_class env sigma c
 
 let decompose_class_app env sigma c =
-  let hd, args = EConstr.decompose_app sigma c in
+  let hd, args = EConstr.decompose_app_list sigma c in
   match EConstr.kind sigma hd with
-  | Proj (p, c) ->
+  | Proj (p, _, c) ->
     let expp = Retyping.expand_projection env sigma p c args in
-    EConstr.decompose_app sigma expp
+    EConstr.decompose_app_list sigma expp
   | _ -> hd, args
 
 let dest_class_app env sigma c =
@@ -121,7 +116,7 @@ let dest_class_app env sigma c =
 
 let dest_class_arity env sigma c =
   let open EConstr in
-  let rels, c = decompose_prod_assum sigma c in
+  let rels, c = decompose_prod_decls sigma c in
     rels, dest_class_app (push_rel_context rels env) sigma c
 
 let class_of_constr env sigma c =
@@ -134,23 +129,23 @@ let is_class_constr sigma c =
   with DestKO | Not_found -> false
 
 let rec is_class_type evd c =
-  let c, _ = Termops.decompose_app_vect evd c in
+  let c, _ = EConstr.decompose_app evd c in
     match EConstr.kind evd c with
     | Prod (_, _, t) -> is_class_type evd t
     | Cast (t, _, _) -> is_class_type evd t
-    | Proj (p, c) -> GlobRef.(Map.mem (ConstRef (Projection.constant p))) !classes
+    | Proj (p, _, c) -> GlobRef.(Map.mem (ConstRef (Projection.constant p))) !classes
     | _ -> is_class_constr evd c
 
 let is_class_evar evd evi =
-  is_class_type evd evi.Evd.evar_concl
+  is_class_type evd (Evd.evar_concl evi)
 
 let rec is_maybe_class_type evd c =
-  let c, _ = Termops.decompose_app_vect evd c in
+  let c, _ = EConstr.decompose_app evd c in
     match EConstr.kind evd c with
     | Prod (_, _, t) -> is_maybe_class_type evd t
     | Cast (t, _, _) -> is_maybe_class_type evd t
     | Evar _ -> true
-    | Proj (p, c) -> GlobRef.(Map.mem (ConstRef (Projection.constant p))) !classes
+    | Proj (p, _, c) -> GlobRef.(Map.mem (ConstRef (Projection.constant p))) !classes
     | _ -> is_class_constr evd c
 
 let () = Hook.set Evd.is_maybe_typeclass_hook (fun evd c -> is_maybe_class_type evd (EConstr.of_constr c))
@@ -209,8 +204,15 @@ let all_instances () =
     GlobRef.Map.fold (fun k v acc -> v :: acc) v acc)
     !instances []
 
-let instances env sigma r =
-  let cl = class_info env sigma r in instances_of cl
+let instances r =
+  Option.map instances_of (class_info r)
+
+let instances_exn env sigma r =
+  match instances r with
+  | Some v -> v
+  | None ->
+    let sigma, c = Evd.fresh_global env sigma r in
+    not_a_class env sigma c
 
 let is_class gr =
   GlobRef.Map.mem gr !classes
@@ -236,15 +238,48 @@ let no_goals_or_obligations _ source =
 
 let has_typeclasses filter evd =
   let tcs = get_typeclass_evars evd in
-  let check ev = filter ev (lazy (snd (Evd.find evd ev).evar_source)) in
+  let check ev = filter ev (lazy (snd (Evd.evar_source (Evd.find_undefined evd ev)))) in
   Evar.Set.exists check tcs
 
-let get_solve_all_instances, solve_all_instances_hook = Hook.make ()
+let get_filtered_typeclass_evars filter evd =
+  let tcs = get_typeclass_evars evd in
+  let check ev = filter ev (lazy (snd (Evd.evar_source (Evd.find_undefined evd ev)))) in
+  Evar.Set.filter check tcs
 
-let solve_all_instances env evd filter unique split fail =
-  Hook.get get_solve_all_instances env evd filter unique split fail
+let solve_all_instances_hook = ref (fun env evd filter unique fail -> assert false)
+
+let solve_all_instances env evd filter unique fail =
+  !solve_all_instances_hook env evd filter unique fail
+
+let set_solve_all_instances f = solve_all_instances_hook := f
 
 let resolve_typeclasses ?(filter=no_goals) ?(unique=get_typeclasses_unique_solutions ())
-    ?(split=true) ?(fail=true) env evd =
+    ?(fail=true) env evd =
   if not (has_typeclasses filter evd) then evd
-  else solve_all_instances env evd filter unique split fail
+  else solve_all_instances env evd filter unique fail
+
+(** In case of unsatisfiable constraints, build a nice error message *)
+
+let error_unresolvable env evd comp =
+  let exception MultipleFound in
+  let fold ev accu =
+    match Evd.find_undefined evd ev with
+    | exception Not_found -> None
+    | evi ->
+      let ev_class = class_of_constr env evd (Evd.evar_concl evi) in
+      if Option.is_empty ev_class then accu
+      else (* focus on one instance if only one was searched for *)
+      if Option.has_some accu then raise MultipleFound
+      else (Some ev)
+  in
+  let ev = try Evar.Set.fold fold comp None with MultipleFound -> None in
+  Pretype_errors.unsatisfiable_constraints env evd ev comp
+
+(** Deprecated *)
+
+let solve_one_instance = ref (fun env evm t -> assert false)
+
+let resolve_one_typeclass ?unique:_ env evm t =
+  !solve_one_instance env evm t
+
+let set_solve_one_instance f = solve_one_instance := f

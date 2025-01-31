@@ -1,5 +1,5 @@
 (************************************************************************)
-(*         *   The Coq Proof Assistant / The Coq Development Team       *)
+(*         *      The Rocq Prover / The Rocq Development Team           *)
 (*  v      *         Copyright INRIA, CNRS and contributors             *)
 (* <O___,, * (see version control and CREDITS file for authors & dates) *)
 (*   \VV/  **************************************************************)
@@ -18,7 +18,7 @@ type 'a hint_info_gen =
     { hint_priority : int option;
       hint_pattern : 'a option }
 
-type hint_info = (Pattern.patvar list * Pattern.constr_pattern) hint_info_gen
+type hint_info = (Id.Set.t * Pattern.constr_pattern) hint_info_gen
 
 type class_method = {
   meth_name : Name.t;
@@ -28,7 +28,7 @@ type class_method = {
 
 (** This module defines type-classes *)
 type typeclass = {
-  cl_univs : Univ.AbstractContext.t;
+  cl_univs : UVars.AbstractContext.t;
   (** The toplevel universe quantification in which the typeclass lives. In
       particular, [cl_props] and [cl_context] are quantified over it. *)
 
@@ -63,7 +63,12 @@ type instance = {
   is_impl: GlobRef.t;
 }
 
-val instances : env -> evar_map -> GlobRef.t -> instance list
+val instances : GlobRef.t -> instance list option
+(** [None] if not a class *)
+
+val instances_exn : env -> evar_map -> GlobRef.t -> instance list
+(** raise [TypeClassError] if not a class *)
+
 val typeclasses : unit -> typeclass list
 val all_instances : unit -> instance list
 
@@ -72,8 +77,11 @@ val load_class : typeclass -> unit
 val load_instance : instance -> unit
 val remove_instance : instance -> unit
 
-val class_info : env -> evar_map -> GlobRef.t -> typeclass (** raises a UserError if not a class *)
+val class_info : GlobRef.t -> typeclass option
+(** [None] if not a class *)
 
+val class_info_exn : env -> evar_map -> GlobRef.t -> typeclass
+(** raise [TypeClassError] if not a class *)
 
 (** These raise a UserError if not a class.
     Caution: the typeclass structures is not instantiated w.r.t. the universe instance.
@@ -81,7 +89,7 @@ val class_info : env -> evar_map -> GlobRef.t -> typeclass (** raises a UserErro
 val dest_class_app : env -> evar_map -> EConstr.constr -> (typeclass * EConstr.EInstance.t) * constr list
 
 (** Get the instantiated typeclass structure for a given universe instance. *)
-val typeclass_univ_instance : typeclass Univ.puniverses -> typeclass
+val typeclass_univ_instance : typeclass UVars.puniverses -> typeclass
 
 (** Just return None if not a class *)
 val class_of_constr : env -> evar_map -> EConstr.constr ->
@@ -116,15 +124,26 @@ val no_goals_or_obligations : evar_filter
 
 val make_unresolvables : (Evar.t -> bool) -> evar_map -> evar_map
 
-val is_class_evar : evar_map -> evar_info -> bool
+val is_class_evar : evar_map -> undefined evar_info -> bool
 val is_class_type : evar_map -> EConstr.types -> bool
 
 val resolve_typeclasses : ?filter:evar_filter -> ?unique:bool ->
-  ?split:bool -> ?fail:bool -> env -> evar_map -> evar_map
+  ?fail:bool -> env -> evar_map -> evar_map
+
+val get_filtered_typeclass_evars : evar_filter -> evar_map -> Evar.Set.t
+
+val error_unresolvable : env -> evar_map -> Evar.Set.t -> 'a
+
+(** A plugin can override the TC resolution engine by calling these two APIs.
+    Beware this action is not registed in the summary (the Undo system) so
+    it is up to the plugin to do so. *)
+val set_solve_all_instances : (env -> evar_map -> evar_filter -> bool -> bool -> evar_map) -> unit
+
+val get_typeclasses_unique_solutions : unit -> bool
+
+(* Deprecated *)
 val resolve_one_typeclass : ?unique:bool -> env -> evar_map -> EConstr.types -> evar_map * EConstr.constr
+[@@deprecated "(9.0) Use Class_tactics.resolve_one_typeclass (\"unique\" argument was ignored)"]
 
-val classes_transparent_state_hook : (unit -> TransparentState.t) Hook.t
-val classes_transparent_state : unit -> TransparentState.t
-
-val solve_all_instances_hook : (env -> evar_map -> evar_filter -> bool -> bool -> bool -> evar_map) Hook.t
-val solve_one_instance_hook : (env -> evar_map -> EConstr.types -> bool -> evar_map * EConstr.constr) Hook.t
+val set_solve_one_instance : (env -> evar_map -> EConstr.types -> evar_map * EConstr.constr) -> unit
+[@@deprecated "(9.0) For internal use only"]
